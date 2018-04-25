@@ -1,7 +1,7 @@
 import curses
 import time
-from jsonrpc.proxy import JSONRPCProxy
 import logging
+from lbrynet.daemon import get_client
 
 log = logging.getLogger(__name__)
 log.addHandler(logging.FileHandler("dht contacts.log"))
@@ -9,7 +9,7 @@ log.addHandler(logging.FileHandler("dht contacts.log"))
 log.setLevel(logging.INFO)
 stdscr = curses.initscr()
 
-api = JSONRPCProxy.from_url("http://localhost:5279")
+api = get_client()
 
 
 def init_curses():
