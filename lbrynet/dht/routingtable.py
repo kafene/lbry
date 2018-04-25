@@ -307,9 +307,6 @@ class OptimizedTreeRoutingTable(TreeRoutingTable):
         if contact.id == self._parentNodeID:
             return
 
-        # Initialize/reset the "successively failed RPC" counter
-        contact.failedRPCs = 0
-
         bucketIndex = self._kbucketIndex(contact.id)
         try:
             self._buckets[bucketIndex].addContact(contact)
