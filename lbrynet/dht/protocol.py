@@ -117,8 +117,6 @@ class KademliaProtocol(protocol.DatagramProtocol):
 
         remoteContact = Contact(message.nodeID, address[0], address[1], self)
 
-        # Refresh the remote node's details in the local node's k-buckets
-        self._node.addContact(remoteContact)
         if isinstance(message, msgtypes.RequestMessage):
             # This is an RPC method request
             self._handleRPC(remoteContact, message.id, message.request, message.args)
@@ -130,6 +128,8 @@ class KademliaProtocol(protocol.DatagramProtocol):
                 df, timeoutCall = self._sentMessages[message.id][1:3]
                 timeoutCall.cancel()
                 del self._sentMessages[message.id]
+                # Refresh the remote node's details in the local node's k-buckets
+                self._node.addContact(remoteContact)
 
                 if hasattr(df, '_rpcRawResponse'):
                     # The RPC requested that the raw response message
