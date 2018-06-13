@@ -11,7 +11,8 @@ from lbryschema.decode import smart_decode
 from lbrynet import conf
 from lbrynet.cryptstream.CryptBlob import CryptBlobInfo
 from lbrynet.dht.constants import dataExpireTimeout
-from lbryum.constants import COIN
+from lbrynet.wallet.database import SQLiteWalletStorage
+from torba.constants import COIN
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +95,8 @@ class SqliteConnection(adbapi.ConnectionPool):
         cls.reactor = reactor
 
 
-class SQLiteStorage(object):
+class SQLiteStorage(SQLiteWalletStorage):
+
     CREATE_TABLES_QUERY = """
             pragma foreign_keys=on;
             pragma journal_mode=WAL;
@@ -157,7 +159,14 @@ class SQLiteStorage(object):
                 amount integer not null,
                 address text not null
             );
-    """
+            
+            create table if not exists reflected_stream (
+                sd_hash text not null,
+                reflector_address text not null,
+                timestamp integer,
+                primary key (sd_hash, reflector_address)
+            );
+    """ + SQLiteWalletStorage.CREATE_TABLES_QUERY
 
     def __init__(self, db_dir, reactor=None):
         if not reactor:
@@ -194,6 +203,12 @@ class SQLiteStorage(object):
             defer.returnValue([i[0] for i in result])
         else:
             defer.returnValue([])
+
+    def run_and_return_id(self, query, *args):
+        def do_save(t):
+            t.execute(query, args)
+            return t.lastrowid
+        return self.db.runInteraction(do_save)
 
     def stop(self):
         self.db.close()
@@ -477,14 +492,10 @@ class SQLiteStorage(object):
         defer.returnValue(result)
 
     def save_published_file(self, stream_hash, file_name, download_directory, data_payment_rate, status="stopped"):
-        def do_save(db_transaction):
-            db_transaction.execute(
-                "insert into file values (?, ?, ?, ?, ?)",
-                (stream_hash, file_name, download_directory, data_payment_rate, status)
-            )
-            file_rowid = db_transaction.lastrowid
-            return file_rowid
-        return self.db.runInteraction(do_save)
+        return self.run_and_return_id(
+            "insert into file values (?, ?, ?, ?, ?)",
+            stream_hash, file_name, download_directory, data_payment_rate, status
+        )
 
     def get_filename_for_rowid(self, rowid):
         return self.run_and_return_one_or_none("select file_name from file where rowid=?", rowid)
@@ -765,3 +776,24 @@ class SQLiteStorage(object):
                     (height, outpoint)
                 )
         return self.db.runInteraction(_save_claim_heights)
+
+    # # # # # # # # # reflector functions # # # # # # # # #
+
+    def update_reflected_stream(self, sd_hash, reflector_address, success=True):
+        if success:
+            return self.db.runOperation(
+                "insert or replace into reflected_stream values (?, ?, ?)",
+                (sd_hash, reflector_address, self.clock.seconds())
+            )
+        return self.db.runOperation(
+            "delete from reflected_stream where sd_hash=? and reflector_address=?",
+            (sd_hash, reflector_address)
+        )
+
+    def get_streams_to_re_reflect(self):
+        return self.run_and_return_list(
+            "select s.sd_hash from stream s "
+            "left outer join reflected_stream r on s.sd_hash=r.sd_hash "
+            "where r.timestamp is null or r.timestamp < ?",
+            self.clock.seconds() - conf.settings['auto_re_reflect_interval']
+        )

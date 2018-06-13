@@ -1,141 +1,233 @@
-import logging
-from binascii import unhexlify
-from operator import itemgetter
+import os
 from twisted.internet import defer
 
-from lbrynet.wallet.wallet import Wallet
-from lbrynet.wallet.ledger import Ledger
-from lbrynet.wallet.protocol import Network
-from lbrynet.wallet.transaction import Transaction
-from lbrynet.wallet.stream import execute_serially
-from lbrynet.wallet.constants import MAXIMUM_FEE_PER_BYTE, MAXIMUM_FEE_PER_NAME_CHAR
+from lbrynet.database.storage import SQLiteStorage
 
-log = logging.getLogger(__name__)
+from torba.basetransaction import NULL_HASH
+from torba.constants import COIN
+from torba.coinselection import CoinSelector
+from torba.manager import WalletManager as BaseWalletManager
+
+from .transaction import Transaction, Output, Input
 
 
-class WalletManager:
+class BackwardsCompatibleNetwork:
+    def __init__(self, manager):
+        self.manager = manager
 
-    def __init__(self, config=None, wallet=None, ledger=None, network=None):
-        self.config = config or {}
-        self.ledger = ledger or Ledger(self.config)
-        self.wallet = wallet or Wallet()
-        self.wallets = [self.wallet]
-        self.network = network or Network(self.config)
-        self.network.on_header.listen(self.process_header)
-        self.network.on_status.listen(self.process_status)
+    def get_local_height(self):
+        return len(self.manager.ledgers.values()[0].headers)
+
+    def get_server_height(self):
+        return self.get_local_height()
+
+
+class LbryWalletManager(BaseWalletManager):
+
+    def __init__(self, db, **kwargs):
+        super(LbryWalletManager, self).__init__(**kwargs)
+        self.db = db  # type: SQLiteStorage
+
+    def create_ledger(self, ledger_class, *args, **kwargs):
+        if issubclass(ledger_class.database_class, self.db.__class__):
+            return ledger_class(*args, db=self.db, **kwargs)
+        return super(LbryWalletManager, self).create_ledger(ledger_class, *args, **kwargs)
 
     @property
-    def fee_per_byte(self):
-        return self.config.get('fee_per_byte', MAXIMUM_FEE_PER_BYTE)
+    def wallet(self):
+        return self
 
     @property
-    def fee_per_name_char(self):
-        return self.config.get('fee_per_name_char', MAXIMUM_FEE_PER_NAME_CHAR)
+    def network(self):
+        return BackwardsCompatibleNetwork(self)
 
     @property
-    def addresses_without_history(self):
-        for wallet in self.wallets:
-            for address in wallet.addresses:
-                if not self.ledger.has_address(address):
-                    yield address
+    def use_encryption(self):
+        # TODO: implement this
+        return False
 
-    def get_least_used_receiving_address(self, max_transactions=1000):
-        return self._get_least_used_address(
-            self.wallet.default_account.receiving_keys.addresses,
-            self.wallet.default_account.receiving_keys,
-            max_transactions
+    @property
+    def is_first_run(self):
+        return True
+
+    def check_locked(self):
+        return defer.succeed(False)
+
+    @classmethod
+    def from_old_config(cls, settings):
+        coin_id = 'lbc_{}'.format(settings['blockchain_name'][-7:])
+        wallet_manager = cls.from_config({
+            'ledgers': {coin_id: {
+                'default_servers': settings['lbryum_servers'],
+                'wallet_path': settings['lbryum_wallet_dir']
+            }}
+        })
+        ledger = wallet_manager.ledgers.values()[0]
+        wallet_manager.create_wallet(
+            os.path.join(settings['lbryum_wallet_dir'], 'default_torba_wallet'),
+            ledger.coin_class
+        )
+        return wallet_manager
+
+    def get_best_blockhash(self):
+        return defer.succeed('')
+
+    def get_unused_address(self):
+        return defer.succeed(self.default_account.get_least_used_receiving_address())
+
+    def get_new_address(self):
+        return self.get_unused_address()
+
+    def reserve_points(self, address, amount):
+        # TODO: check if we have enough to cover amount
+        return ReservedPoints(address, amount)
+
+    def send_points_to_address(self, reserved, amount):
+        destination_address = reserved.identifier.encode('latin1')
+        return self.send_amount_to_address(amount, destination_address)
+
+    def get_wallet_info_query_handler_factory(self):
+        return LBRYcrdAddressQueryHandlerFactory(self)
+
+    def get_info_exchanger(self):
+        return LBRYcrdAddressRequester(self)
+
+    def resolve(self, *uris):
+        ledger = self.default_account.coin.ledger  # type: LBCLedger
+        return ledger.resolve(uris)
+
+    def get_name_claims(self):
+        return defer.succeed([])
+
+    def address_is_mine(self, address):
+        return defer.succeed(True)
+
+    def get_history(self):
+        return defer.succeed([])
+
+    def claim_name(self, name, amount, claim):
+        amount = int(amount * COIN)
+
+        account = self.default_account
+        coin = account.coin
+        ledger = coin.ledger
+
+        estimators = [
+            txo.get_estimator(coin) for txo in ledger.get_unspent_outputs()
+        ]
+
+        cost_of_output = coin.get_input_output_fee(
+            Output.pay_pubkey_hash(COIN, NULL_HASH)
         )
 
-    def get_least_used_change_address(self, max_transactions=100):
-        return self._get_least_used_address(
-            self.wallet.default_account.change_keys.addresses,
-            self.wallet.default_account.change_keys,
-            max_transactions
-        )
+        selector = CoinSelector(estimators, amount, cost_of_output)
+        spendables = selector.select()
+        if not spendables:
+            raise ValueError('Not enough funds to cover this transaction.')
 
-    def _get_least_used_address(self, addresses, sequence, max_transactions):
-        address = self.ledger.get_least_used_address(addresses, max_transactions)
-        if address:
-            return address
-        address = sequence.generate_next_address()
-        self.subscribe_history(address)
-        return address
+        claim_address = account.get_least_used_receiving_address()
+        outputs = [
+            Output.pay_claim_name_pubkey_hash(
+                amount, name, claim, coin.address_to_hash160(claim_address)
+            )
+        ]
 
-    @defer.inlineCallbacks
-    def start(self):
-        first_connection = self.network.on_connected.first
-        self.network.start()
-        yield first_connection
-        self.ledger.headers.touch()
-        yield self.update_headers()
-        yield self.network.subscribe_headers()
-        yield self.update_wallet()
+        spent_sum = sum(s.effective_amount for s in spendables)
+        if spent_sum > amount:
+            change_address = account.get_least_used_change_address()
+            change_hash160 = coin.address_to_hash160(change_address)
+            outputs.append(Output.pay_pubkey_hash(spent_sum - amount, change_hash160))
 
-    def stop(self):
-        return self.network.stop()
+        tx = Transaction() \
+            .add_inputs([s.txi for s in spendables]) \
+            .add_outputs(outputs) \
+            .sign(account)
 
-    @execute_serially
-    @defer.inlineCallbacks
-    def update_headers(self):
-        while True:
-            height_sought = len(self.ledger.headers)
-            headers = yield self.network.get_headers(height_sought)
-            log.info("received {} headers starting at {} height".format(headers['count'], height_sought))
-            if headers['count'] <= 0:
-                break
-            yield self.ledger.headers.connect(height_sought, headers['hex'].decode('hex'))
+        return tx
 
-    @defer.inlineCallbacks
-    def process_header(self, response):
-        header = response[0]
-        if self.update_headers.is_running:
-            return
-        if header['height'] == len(self.ledger.headers):
-            # New header from network directly connects after the last local header.
-            yield self.ledger.headers.connect(len(self.ledger.headers), header['hex'].decode('hex'))
-        elif header['height'] > len(self.ledger.headers):
-            # New header is several heights ahead of local, do download instead.
-            yield self.update_headers()
 
-    @execute_serially
-    @defer.inlineCallbacks
-    def update_wallet(self):
-        # Before subscribing, download history for any addresses that don't have any,
-        # this avoids situation where we're getting status updates to addresses we know
-        # need to update anyways. Continue to get history and create more addresses until
-        # all missing addresses are created and history for them is fully restored.
-        self.wallet.ensure_enough_addresses()
-        addresses = list(self.addresses_without_history)
-        while addresses:
-            yield defer.gatherResults([
-                self.update_history(a) for a in addresses
-            ])
-            addresses = self.wallet.ensure_enough_addresses()
+class ReservedPoints:
+    def __init__(self, identifier, amount):
+        self.identifier = identifier
+        self.amount = amount
 
-        # By this point all of the addresses should be restored and we
-        # can now subscribe all of them to receive updates.
-        yield defer.gatherResults([
-            self.subscribe_history(address)
-            for address in self.wallet.addresses
-        ])
 
-    @defer.inlineCallbacks
-    def update_history(self, address):
-        history = yield self.network.get_history(address)
-        for hash in map(itemgetter('tx_hash'), history):
-            transaction = self.ledger.get_transaction(hash)
-            if not transaction:
-                raw = yield self.network.get_transaction(hash)
-                transaction = Transaction(unhexlify(raw))
-            self.ledger.add_transaction(address, transaction)
+class ClientRequest:
+    def __init__(self, request_dict, response_identifier=None):
+        self.request_dict = request_dict
+        self.response_identifier = response_identifier
 
-    @defer.inlineCallbacks
-    def subscribe_history(self, address):
-        status = yield self.network.subscribe_address(address)
-        if status != self.ledger.get_status(address):
-            self.update_history(address)
 
-    def process_status(self, response):
-        address, status = response
-        if status != self.ledger.get_status(address):
-            self.update_history(address)
+class LBRYcrdAddressRequester:
+
+    def __init__(self, wallet):
+        self.wallet = wallet
+        self._protocols = []
+
+    def send_next_request(self, peer, protocol):
+        if not protocol in self._protocols:
+            r = ClientRequest({'lbrycrd_address': True}, 'lbrycrd_address')
+            d = protocol.add_request(r)
+            d.addCallback(self._handle_address_response, peer, r, protocol)
+            d.addErrback(self._request_failed, peer)
+            self._protocols.append(protocol)
+            return defer.succeed(True)
+        else:
+            return defer.succeed(False)
+
+    def _handle_address_response(self, response_dict, peer, request, protocol):
+        if request.response_identifier not in response_dict:
+            raise ValueError(
+                "Expected {} in response but did not get it".format(request.response_identifier))
+        assert protocol in self._protocols, "Responding protocol is not in our list of protocols"
+        address = response_dict[request.response_identifier]
+        self.wallet.update_peer_address(peer, address)
+
+    def _request_failed(self, error, peer):
+        raise Exception("A peer failed to send a valid public key response. Error: %s, peer: %s",
+                        error.getErrorMessage(), str(peer))
+
+
+class LBRYcrdAddressQueryHandlerFactory:
+
+    def __init__(self, wallet):
+        self.wallet = wallet
+
+    def build_query_handler(self):
+        q_h = LBRYcrdAddressQueryHandler(self.wallet)
+        return q_h
+
+    def get_primary_query_identifier(self):
+        return 'lbrycrd_address'
+
+    def get_description(self):
+        return "LBRYcrd Address - an address for receiving payments via LBRYcrd"
+
+
+class LBRYcrdAddressQueryHandler:
+
+    def __init__(self, wallet):
+        self.wallet = wallet
+        self.query_identifiers = ['lbrycrd_address']
+        self.address = None
+        self.peer = None
+
+    def register_with_request_handler(self, request_handler, peer):
+        self.peer = peer
+        request_handler.register_query_handler(self, self.query_identifiers)
+
+    def handle_queries(self, queries):
+
+        def create_response(address):
+            self.address = address
+            fields = {'lbrycrd_address': address}
+            return fields
+
+        if self.query_identifiers[0] in queries:
+            d = self.wallet.get_unused_address_for_peer(self.peer)
+            d.addCallback(create_response)
+            return d
+        if self.address is None:
+            raise Exception("Expected a request for an address, but did not receive one")
+        else:
+            return defer.succeed({})

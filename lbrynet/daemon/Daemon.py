@@ -14,6 +14,7 @@ from twisted.internet import defer, threads, error, reactor
 from twisted.internet.task import LoopingCall
 from twisted.python.failure import Failure
 
+import lbryschema
 from lbryschema.claim import ClaimDict
 from lbryschema.uri import parse_lbry_uri
 from lbryschema.error import URIParseError, DecodeError
@@ -25,7 +26,7 @@ from lbryschema.decode import smart_decode
 from lbrynet.core.system_info import get_lbrynet_version
 from lbrynet.database.storage import SQLiteStorage
 from lbrynet import conf
-from lbrynet.conf import LBRYCRD_WALLET, LBRYUM_WALLET
+from lbrynet.conf import LBRYCRD_WALLET, LBRYUM_WALLET, TORBA_WALLET
 from lbrynet.reflector import reupload
 from lbrynet.reflector import ServerFactory as reflector_server_factory
 from lbrynet.core.log_support import configure_loggly_handler
@@ -41,7 +42,7 @@ from lbrynet.core import utils, system_info
 from lbrynet.core.StreamDescriptor import StreamDescriptorIdentifier, download_sd_blob
 from lbrynet.core.StreamDescriptor import EncryptedFileStreamType
 from lbrynet.core.Session import Session
-from lbrynet.core.Wallet import LBRYumWallet
+#from lbrynet.core.Wallet import LBRYumWallet
 from lbrynet.core.looping_call_manager import LoopingCallManager
 from lbrynet.core.server.BlobRequestHandler import BlobRequestHandlerFactory
 from lbrynet.core.server.ServerProtocol import ServerProtocolFactory
@@ -52,6 +53,7 @@ from lbrynet.dht.error import TimeoutError
 from lbrynet.core.Peer import Peer
 from lbrynet.core.SinglePeerDownloader import SinglePeerDownloader
 from lbrynet.core.client.StandaloneBlobDownloader import StandaloneBlobDownloader
+from lbrynet.wallet.manager import LbryWalletManager
 
 log = logging.getLogger(__name__)
 
@@ -199,7 +201,7 @@ class Daemon(AuthJSONRPCServer):
         self.connected_to_internet = True
         self.connection_status_code = None
         self.platform = None
-        self.current_db_revision = 7
+        self.current_db_revision = 8
         self.db_revision_file = conf.settings.get_db_revision_filename()
         self.session = None
         self._session_id = conf.settings.get_session_id()
@@ -525,7 +527,12 @@ class Daemon(AuthJSONRPCServer):
 
     def _get_session(self):
         def get_wallet():
-            if self.wallet_type == LBRYCRD_WALLET:
+            if self.wallet_type == TORBA_WALLET:
+                log.info("Using torba wallet")
+                wallet = LbryWalletManager.from_old_config(conf.settings)
+                lbryschema.BLOCKCHAIN_NAME = conf.settings['blockchain_name']
+                return defer.succeed(wallet)
+            elif self.wallet_type == LBRYCRD_WALLET:
                 raise ValueError('LBRYcrd Wallet is no longer supported')
             elif self.wallet_type == LBRYUM_WALLET:
 

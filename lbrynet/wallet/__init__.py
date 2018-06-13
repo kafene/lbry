@@ -1,10 +1,4 @@
-_wallet_manager = None
+__coin__ = 'LBC'
 
-
-def set_wallet_manager(wallet_manager):
-    global _wallet_manager
-    _wallet_manager = wallet_manager
-
-
-def get_wallet_manager():
-    return _wallet_manager
+from .coin import LBC, LBCRegTest
+from .manager import LbryWalletManager

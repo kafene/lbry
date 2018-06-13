@@ -1,80 +1,88 @@
 from binascii import hexlify, unhexlify
 from twisted.trial import unittest
-from lbrynet.wallet.constants import CENT
-from lbrynet.wallet.transaction import Transaction, Input, Output
-from lbrynet.wallet.manager import WalletManager
-from lbrynet.wallet import set_wallet_manager
-from lbrynet.wallet.bip32 import PrivateKey
-from lbrynet.wallet.mnemonic import Mnemonic
+
+from torba.baseaccount import Account
+from torba.constants import CENT, COIN
+from torba.wallet import Wallet
+from torba.basetransaction import NULL_HASH
+
+from lbrynet.wallet.coin import LBC
+from lbrynet.wallet.transaction import Transaction, Output, Input
+from lbrynet.wallet.manager import LbryWalletManager
 
 
-NULL_HASH = '\x00'*32
 FEE_PER_BYTE = 50
 FEE_PER_CHAR = 200000
+
+
+def get_output(amount=CENT, pubkey_hash=NULL_HASH):
+    return Transaction() \
+        .add_outputs([Output.pay_pubkey_hash(amount, pubkey_hash)]) \
+        .outputs[0]
+
+
+def get_input():
+    return Input.spend(get_output())
+
+
+def get_transaction(txo=None):
+    return Transaction() \
+        .add_inputs([get_input()]) \
+        .add_outputs([txo or Output.pay_pubkey_hash(CENT, NULL_HASH)])
+
+
+def get_claim_transaction(claim_name, claim=b''):
+    return get_transaction(
+        Output.pay_claim_name_pubkey_hash(CENT, claim_name, claim, NULL_HASH)
+    )
+
+
+def get_wallet_and_coin():
+    ledger = LbryWalletManager().get_or_create_ledger(LBC.get_id())
+    coin = LBC(ledger)
+    return Wallet('Main', [coin], [Account.generate(coin, u'lbryum')]), coin
 
 
 class TestSizeAndFeeEstimation(unittest.TestCase):
 
     def setUp(self):
-        set_wallet_manager(WalletManager({
-            'fee_per_byte': FEE_PER_BYTE,
-            'fee_per_name_char': FEE_PER_CHAR
-        }))
+        self.wallet, self.coin = get_wallet_and_coin()
 
-    @staticmethod
-    def get_output():
-        return Output.pay_pubkey_hash(Transaction(), 1, CENT, NULL_HASH)
-
-    @classmethod
-    def get_input(cls):
-        return cls.get_output().spend(fake=True)
-
-    @classmethod
-    def get_transaction(cls):
-        tx = Transaction()
-        Output.pay_pubkey_hash(tx, 1, CENT, NULL_HASH)
-        tx.add_inputs([cls.get_input()])
-        return tx
-
-    @classmethod
-    def get_claim_transaction(cls, claim_name, claim=''):
-        tx = Transaction()
-        Output.pay_claim_name_pubkey_hash(tx, 1, CENT, claim_name, claim, NULL_HASH)
-        tx.add_inputs([cls.get_input()])
-        return tx
+    def io_fee(self, io):
+        return self.coin.get_input_output_fee(io)
 
     def test_output_size_and_fee(self):
-        txo = self.get_output()
+        txo = get_output()
         self.assertEqual(txo.size, 46)
-        self.assertEqual(txo.fee, 46 * FEE_PER_BYTE)
+        self.assertEqual(self.io_fee(txo), 46 * FEE_PER_BYTE)
 
     def test_input_size_and_fee(self):
-        txi = self.get_input()
+        txi = get_input()
         self.assertEqual(txi.size, 148)
-        self.assertEqual(txi.fee, 148 * FEE_PER_BYTE)
+        self.assertEqual(self.io_fee(txi), 148 * FEE_PER_BYTE)
 
     def test_transaction_size_and_fee(self):
-        tx = self.get_transaction()
+        tx = get_transaction()
         base_size = tx.size - 1 - tx.inputs[0].size
         self.assertEqual(tx.size, 204)
         self.assertEqual(tx.base_size, base_size)
-        self.assertEqual(tx.base_fee, FEE_PER_BYTE * base_size)
+        self.assertEqual(self.coin.get_transaction_base_fee(tx), FEE_PER_BYTE * base_size)
 
     def test_claim_name_transaction_size_and_fee(self):
         # fee based on claim name is the larger fee
-        claim_name = 'verylongname'
-        tx = self.get_claim_transaction(claim_name, '0'*4000)
+        claim_name = b'verylongname'
+        tx = get_claim_transaction(claim_name, b'0'*4000)
         base_size = tx.size - 1 - tx.inputs[0].size
         self.assertEqual(tx.size, 4225)
         self.assertEqual(tx.base_size, base_size)
-        self.assertEqual(tx.base_fee, len(claim_name) * FEE_PER_CHAR)
+        self.assertEqual(self.coin.get_transaction_base_fee(tx), len(claim_name) * FEE_PER_CHAR)
         # fee based on total bytes is the larger fee
-        claim_name = 'a'
-        tx = self.get_claim_transaction(claim_name, '0'*4000)
+        claim_name = b'a'
+        tx = get_claim_transaction(claim_name, b'0'*4000)
         base_size = tx.size - 1 - tx.inputs[0].size
         self.assertEqual(tx.size, 4214)
         self.assertEqual(tx.base_size, base_size)
-        self.assertEqual(tx.base_fee, FEE_PER_BYTE * base_size)
+        self.assertEqual(self.coin.get_transaction_base_fee(tx), FEE_PER_BYTE * base_size)
 
 
 class TestTransactionSerialization(unittest.TestCase):
@@ -92,7 +100,7 @@ class TestTransactionSerialization(unittest.TestCase):
         self.assertEqual(len(tx.outputs), 1)
 
         coinbase = tx.inputs[0]
-        self.assertEqual(coinbase.output_tx_hash, NULL_HASH)
+        self.assertEqual(coinbase.output_txid, NULL_HASH)
         self.assertEqual(coinbase.output_index, 0xFFFFFFFF)
         self.assertEqual(coinbase.sequence, 0xFFFFFFFF)
         self.assertTrue(coinbase.is_coinbase)
@@ -125,7 +133,7 @@ class TestTransactionSerialization(unittest.TestCase):
         self.assertEqual(len(tx.outputs), 1)
 
         coinbase = tx.inputs[0]
-        self.assertEqual(coinbase.output_tx_hash, NULL_HASH)
+        self.assertEqual(coinbase.output_txid, NULL_HASH)
         self.assertEqual(coinbase.output_index, 0xFFFFFFFF)
         self.assertEqual(coinbase.sequence, 0)
         self.assertTrue(coinbase.is_coinbase)
@@ -160,15 +168,15 @@ class TestTransactionSerialization(unittest.TestCase):
             "00001976a914f521178feb733a719964e1da4a9efb09dcc39cfa88ac00000000"
         )
         tx = Transaction(raw)
-        self.assertEqual(hexlify(tx.id), b'666c3d15de1d6949a4fe717126c368e274b36957dce29fd401138c1e87e92a62')
+        self.assertEqual(tx.id, b'666c3d15de1d6949a4fe717126c368e274b36957dce29fd401138c1e87e92a62')
         self.assertEqual(tx.version, 1)
         self.assertEqual(tx.locktime, 0)
         self.assertEqual(len(tx.inputs), 1)
         self.assertEqual(len(tx.outputs), 2)
 
-        txin = tx.inputs[0]  # type: Input
+        txin = tx.inputs[0]
         self.assertEqual(
-            hexlify(txin.output_tx_hash[::-1]),
+            hexlify(txin.output_txid[::-1]),
             b'1dfd535b6c8550ebe95abceb877f92f76f30e5ba4d3483b043386027b3e13324'
         )
         self.assertEqual(txin.output_index, 0)
@@ -186,7 +194,7 @@ class TestTransactionSerialization(unittest.TestCase):
         )
 
         # Claim
-        out0 = tx.outputs[0]  # type: Output
+        out0 = tx.outputs[0]
         self.assertEqual(out0.amount, 10000000)
         self.assertEqual(out0.index, 0)
         self.assertTrue(out0.script.is_pay_pubkey_hash)
@@ -199,7 +207,7 @@ class TestTransactionSerialization(unittest.TestCase):
         )
 
         # Change
-        out1 = tx.outputs[1]  # type: Output
+        out1 = tx.outputs[1]
         self.assertEqual(out1.amount, 189977100)
         self.assertEqual(out1.index, 1)
         self.assertTrue(out1.script.is_pay_pubkey_hash)
@@ -215,15 +223,27 @@ class TestTransactionSerialization(unittest.TestCase):
 
 class TestTransactionSigning(unittest.TestCase):
 
-    def setUp(self):
-        self.private_key = PrivateKey.from_seed(Mnemonic.mnemonic_to_seed(
-           'program leader library giant team normal suspect crater pair miracle sweet until absent'
-        ))
-
     def test_sign(self):
-        tx = Transaction()
-        Output.pay_pubkey_hash(Transaction(), 0, CENT, NULL_HASH).spend(fake=True)
-        tx.add_inputs([self.get_input()])
-        Output.pay_pubkey_hash(tx, 0, CENT, NULL_HASH)
-        tx = self.get_tx()
+        ledger = LbryWalletManager().get_or_create_ledger(LBC.get_id())
+        coin = LBC(ledger)
+        wallet = Wallet('Main', [coin], [Account.from_seed(
+            coin, u'carbon smart garage balance margin twelve chest sword toast envelope bottom sto'
+                  u'mach absent', u'lbryum'
+        )])
+        account = wallet.default_account
 
+        address1 = account.receiving_keys.generate_next_address()
+        address2 = account.receiving_keys.generate_next_address()
+        pubkey_hash1 = account.coin.address_to_hash160(address1)
+        pubkey_hash2 = account.coin.address_to_hash160(address2)
+
+        tx = Transaction() \
+            .add_inputs([Input.spend(get_output(int(2*COIN), pubkey_hash1))]) \
+            .add_outputs([Output.pay_pubkey_hash(int(1.9*COIN), pubkey_hash2)]) \
+            .sign(account)
+
+        self.assertEqual(
+            hexlify(tx.inputs[0].script.values['signature']),
+            b'304402200dafa26ad7cf38c5a971c8a25ce7d85a076235f146126762296b1223c42ae21e022020ef9eeb8'
+            b'398327891008c5c0be4357683f12cb22346691ff23914f457bf679601'
+        )

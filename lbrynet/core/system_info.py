@@ -5,7 +5,6 @@ import os
 
 from urllib2 import urlopen, URLError
 from lbryschema import __version__ as lbryschema_version
-from lbryum import __version__ as LBRYUM_VERSION
 from lbrynet import build_type, __version__ as lbrynet_version
 from lbrynet.conf import ROOT_DIR
 
@@ -32,12 +31,11 @@ def get_platform(get_ip=True):
         "os_release": platform.release(),
         "os_system": platform.system(),
         "lbrynet_version": get_lbrynet_version(),
-        "lbryum_version": LBRYUM_VERSION,
         "lbryschema_version": lbryschema_version,
         "build": build_type.BUILD,  # CI server sets this during build step
     }
 
-    # TODO: remove this from get_platform and add a get_external_ip function using txrequests
+    # TODO: remove this from get_platform and add a get_external_ip function using treq
     if get_ip:
         try:
             response = json.loads(urlopen("https://api.lbry.io/ip").read())

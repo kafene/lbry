@@ -20,15 +20,13 @@ requires = [
     'base58',
     'envparse',
     'jsonrpc',
-    'lbryschema==0.0.15',
-    'lbryum==3.2.1',
+    'lbryschema',
     'miniupnpc',
-    'pycrypto',
     'pyyaml',
     'requests',
-    'txrequests',
     'txJSON-RPC',
     'zope.interface',
+    'treq',
     'docopt'
 ]
 
