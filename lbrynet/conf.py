@@ -246,7 +246,7 @@ ADJUSTABLE_SETTINGS = {
     # Access-Control-Allow-Origin. For example
     # set to '*' to allow all requests, or set to 'http://localhost:8080'
     # if you're running a test UI on that port
-    'allowed_origin': (str, ''),
+    'allowed_origin': (str, '*'),
 
     # Changing this value is not-advised as it could potentially
     # expose the lbrynet daemon to the outside world which would
@@ -254,6 +254,8 @@ ADJUSTABLE_SETTINGS = {
     # all of your credits.
     'api_host': (str, 'localhost'),
     'api_port': (int, 5279),
+    'websocket_host': (str, 'localhost'),
+    'websocket_port': (int, 9000),
     # claims set to expire within this many blocks will be
     # automatically renewed after startup (if set to 0, renews
     # will not be made automatically)
@@ -294,8 +296,8 @@ ADJUSTABLE_SETTINGS = {
     'use_auth_http': (bool, False),
     'use_upnp': (bool, True),
     'use_keyring': (bool, False),
-    'wallet': (str, LBRYUM_WALLET),
-    'blockchain_name': (str, 'lbrycrd_main'),
+    'wallet': (str, TORBA_WALLET),
+    'blockchain_name': (str, 'lbc_regtest'),
     'lbryum_servers': (list, [('lbryum8.lbry.io', 50001), ('lbryum9.lbry.io', 50001)], server_list),
     's3_headers_depth': (int, 96 * 10)   # download headers from s3 when the local height is more than 10 chunks behind
 }

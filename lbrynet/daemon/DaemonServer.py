@@ -5,8 +5,11 @@ from twisted.web import server, guard, resource
 from twisted.internet import defer, reactor, error
 from twisted.cred import portal
 
+from autobahn.twisted.websocket import WebSocketServerFactory
+
 from lbrynet import conf
 from lbrynet.daemon.Daemon import Daemon
+from lbrynet.daemon.DaemonWebSocket import LbryServerProtocol, LbryServerFactory
 from lbrynet.daemon.auth.auth import PasswordChecker, HttpPasswordRealm
 from lbrynet.daemon.auth.util import initialize_api_key_file
 
@@ -26,6 +29,7 @@ class DaemonServer(object):
         self.root = None
         self.server_port = None
         self.analytics_manager = analytics_manager
+        self.websocket_server = None
 
     def _setup_server(self, use_auth):
         self.root = IndexResource()
@@ -46,9 +50,27 @@ class DaemonServer(object):
 
         return defer.succeed(True)
 
+    def _setup_websocket_server(self):
+        host, port = conf.settings['websocket_host'], conf.settings['websocket_port']
+
+        factory = LbryServerFactory(u"ws://{}:{}".format(host, port), self._daemon)
+        factory.protocol = LbryServerProtocol
+
+        try:
+            self.websocket_server = reactor.listenTCP(
+                conf.settings['websocket_port'], factory,
+                interface=conf.settings['websocket_host'])
+            log.info("lbrynet WebSocket server listening on TCP 127.0.0.1:9000")
+        except error.CannotListenError:
+            log.info('WebSocket server already running, exiting app')
+            raise
+
+        return defer.succeed(True)
+
     @defer.inlineCallbacks
     def start(self, use_auth):
         yield self._setup_server(use_auth)
+        yield self._setup_websocket_server()
         yield self._daemon.setup()
 
     def stop(self):
