@@ -8,8 +8,6 @@ from autobahn.twisted.websocket import WebSocketServerProtocol, WebSocketServerF
 from autobahn.twisted.util import sleep
 from twisted.internet import defer, reactor, protocol
 
-from lbrynet.core import event as lbry_event
-
 from torba.basenetwork import BaseNetwork as TorbaBaseNetwork
 from torba.baseledger import BaseLedger as TorbaBaseLedger
 from lbrynet.wallet.ledger import LBCLedger, RegTestLedger
@@ -19,21 +17,12 @@ log = logging.getLogger(__name__)
 
 
 class LbryServerProtocol(WebSocketServerProtocol):
-    events_registered = False
-
     def __init__(self, daemon=None):
         super(LbryServerProtocol, self).__init__()
 
         self.request_id = 0
         self.lookup_table = {}
         self.daemon = daemon
-
-        if not self.__class__.events_registered:
-            lbry_event.emitter.on(lbry_event.DaemonStarted.name, self._handle_event)
-            lbry_event.emitter.on(lbry_event.WalletLoaded.name, self._handle_event)
-            lbry_event.emitter.on(lbry_event.WalletBalanceChanged.name, self._handle_event)
-            lbry_event.emitter.on(lbry_event.Message.name, self._handle_event)
-            self.__class__.events_registered = True
 
     def onConnect(self, request):
         log.info("WebSocket Client connecting: %s", request.peer)
@@ -80,10 +69,11 @@ class LbryServerProtocol(WebSocketServerProtocol):
 
         # start sending messages every second ..
         while True:
-           now = datetime.datetime.now().strftime('%H:%M:%S')
-           msg = u"Hello, world! It's {} o'clock!".format(now)
-           lbry_event.emit(lbry_event.Message(msg))
-           yield sleep(3)
+            now = datetime.datetime.now().strftime('%H:%M:%S')
+            msg = u"Hello, world! It's {} o'clock!".format(now)
+            message = json.dumps({'$event': 'message', 'data': msg})
+            self.sendMessage(message.encode('utf8'), isBinary=False)
+            yield sleep(3)
 
     def _handle_event(self, event):
         assert isinstance(event, lbry_event.Event)
@@ -93,11 +83,12 @@ class LbryServerProtocol(WebSocketServerProtocol):
 
     def send_wallet_balance(self):
         balance = self.daemon.session.wallet.get_balance()
-        lbry_event.emit(lbry_event.WalletLoaded(balance))
+        message = json.dumps({'$event': 'wallet_balance', 'data': {'balance': balance}})
+        self.sendMessage(message.encode('utf8'), isBinary=False)
 
     def send_routing_table(self):
         routing_table = yield self.daemon.jsonrpc_routing_table_get()
-        self.sendMessage(self.encodeMessage({'data': {'routing_table': routing_table}}))
+        self.sendMessage(self.encodeMessage({'$event': 'routing_table', 'data': {'routing_table': routing_table}}))
 
     # @defer.inlineCallbacks
     def onMessage(self, payload, isBinary):
