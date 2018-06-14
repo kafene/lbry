@@ -10,7 +10,6 @@ from twisted.internet import defer, reactor, protocol
 
 from torba.basenetwork import BaseNetwork as TorbaBaseNetwork
 from torba.baseledger import BaseLedger as TorbaBaseLedger
-from lbrynet.wallet.ledger import LBCLedger, RegTestLedger
 from pprint import pprint
 
 log = logging.getLogger(__name__)
